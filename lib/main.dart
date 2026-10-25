@@ -3,11 +3,16 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import 'package:intl/intl.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
   runApp(
     ChangeNotifierProvider(
-      create: (_) => AppProvider(),
+      create: (_) => AppProvider(prefs),
       child: const TuccVendasApp(),
     ),
   );
@@ -30,7 +35,7 @@ class AdminAuth {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('Esta ação de alteração/exclusão exige a senha de Administrador:'),
+              const Text('Esta ação exige a senha de Administrador:'),
               const SizedBox(height: 10),
               TextField(
                 controller: passwordController,
@@ -83,6 +88,26 @@ class Product {
     this.partnerId,
   });
 
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'costPrice': costPrice,
+        'salePrice': salePrice,
+        'stockQuantity': stockQuantity,
+        'isService': isService,
+        'partnerId': partnerId,
+      };
+
+  factory Product.fromJson(Map<String, dynamic> json) => Product(
+        id: json['id'],
+        name: json['name'],
+        costPrice: json['costPrice'],
+        salePrice: json['salePrice'],
+        stockQuantity: json['stockQuantity'],
+        isService: json['isService'] ?? false,
+        partnerId: json['partnerId'],
+      );
+
   static double calculateSuggestedPrice(double cost, double marginPercent) {
     return cost * (1 + (marginPercent / 100));
   }
@@ -102,6 +127,22 @@ class Customer {
     this.isTuccCreditoEnabled = true,
     this.pendingBalance = 0.0,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'phone': phone,
+        'isTuccCreditoEnabled': isTuccCreditoEnabled,
+        'pendingBalance': pendingBalance,
+      };
+
+  factory Customer.fromJson(Map<String, dynamic> json) => Customer(
+        id: json['id'],
+        name: json['name'],
+        phone: json['phone'],
+        isTuccCreditoEnabled: json['isTuccCreditoEnabled'] ?? true,
+        pendingBalance: json['pendingBalance'] ?? 0.0,
+      );
 }
 
 class Partner {
@@ -114,28 +155,41 @@ class Partner {
     required this.name,
     this.balanceToRepay = 0.0,
   });
+
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'balanceToRepay': balanceToRepay};
+  factory Partner.fromJson(Map<String, dynamic> json) => Partner(id: json['id'], name: json['name'], balanceToRepay: json['balanceToRepay'] ?? 0.0);
 }
 
 class Shift {
-  final String id;
   final String operatorName;
   final DateTime startTime;
-  DateTime? endTime;
   double initialCash;
-  double finalCash;
   double totalSuprimento;
   double totalSangria;
 
   Shift({
-    required this.id,
     required this.operatorName,
     required this.startTime,
-    this.endTime,
     this.initialCash = 0.0,
-    this.finalCash = 0.0,
     this.totalSuprimento = 0.0,
     this.totalSangria = 0.0,
   });
+
+  Map<String, dynamic> toJson() => {
+        'operatorName': operatorName,
+        'startTime': startTime.toIso8601String(),
+        'initialCash': initialCash,
+        'totalSuprimento': totalSuprimento,
+        'totalSangria': totalSangria,
+      };
+
+  factory Shift.fromJson(Map<String, dynamic> json) => Shift(
+        operatorName: json['operatorName'],
+        startTime: DateTime.parse(json['startTime']),
+        initialCash: json['initialCash'] ?? 0.0,
+        totalSuprimento: json['totalSuprimento'] ?? 0.0,
+        totalSangria: json['totalSangria'] ?? 0.0,
+      );
 }
 
 enum PaymentMethod { dinheiro, cartao, pix, tuccCredito }
@@ -156,6 +210,24 @@ class SaleItem {
     required this.costPrice,
     this.partnerId,
   });
+
+  Map<String, dynamic> toJson() => {
+        'productId': productId,
+        'productName': productName,
+        'quantity': quantity,
+        'unitPrice': unitPrice,
+        'costPrice': costPrice,
+        'partnerId': partnerId,
+      };
+
+  factory SaleItem.fromJson(Map<String, dynamic> json) => SaleItem(
+        productId: json['productId'],
+        productName: json['productName'],
+        quantity: json['quantity'],
+        unitPrice: json['unitPrice'],
+        costPrice: json['costPrice'],
+        partnerId: json['partnerId'],
+      );
 
   double get totalPrice => quantity * unitPrice;
   double get totalProfit => (unitPrice - costPrice) * quantity;
@@ -179,17 +251,148 @@ class Sale {
     this.customerId,
     required this.operatorName,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'date': date.toIso8601String(),
+        'items': items.map((i) => i.toJson()).toList(),
+        'totalAmount': totalAmount,
+        'paymentMethod': paymentMethod.index,
+        'customerId': customerId,
+        'operatorName': operatorName,
+      };
+
+  factory Sale.fromJson(Map<String, dynamic> json) => Sale(
+        id: json['id'],
+        date: DateTime.parse(json['date']),
+        items: (json['items'] as List).map((i) => SaleItem.fromJson(i)).toList(),
+        totalAmount: json['totalAmount'],
+        paymentMethod: PaymentMethod.values[json['paymentMethod']],
+        customerId: json['customerId'],
+        operatorName: json['operatorName'],
+      );
 }
 
 // ==========================================
-// PROVIDER (STATE MANAGEMENT)
+// PROVIDER (STATE MANAGEMENT + PERSISTENCE)
 // ==========================================
 
 class AppProvider with ChangeNotifier {
+  final SharedPreferences _prefs;
+
   String appTitle = 'TUCC VENDAS';
   String appSubtitle = 'Templo de Umbanda Cigana Constanza';
   String reportPhone = '5511999999999';
   String adminPassword = '1234';
+
+  List<Product> _products = [];
+  List<Customer> _customers = [];
+  List<Partner> _partners = [];
+  List<Sale> _sales = [];
+  Shift? _currentShift;
+
+  AppProvider(this._prefs) {
+    _loadData();
+  }
+
+  void _loadData() {
+    adminPassword = _prefs.getString('adminPassword') ?? '1234';
+    reportPhone = _prefs.getString('reportPhone') ?? '5511999999999';
+    appTitle = _prefs.getString('appTitle') ?? 'TUCC VENDAS';
+    appSubtitle = _prefs.getString('appSubtitle') ?? 'Templo de Umbanda Cigana Constanza';
+
+    final productsStr = _prefs.getString('products');
+    if (productsStr != null) {
+      final List decoded = jsonDecode(productsStr);
+      _products = decoded.map((e) => Product.fromJson(e)).toList();
+    } else {
+      _products = [
+        Product(id: '1', name: 'Salgado Rissoles', costPrice: 3.0, salePrice: 6.0, stockQuantity: 20),
+        Product(id: '2', name: 'Doce da Yasmim', costPrice: 4.0, salePrice: 8.0, stockQuantity: 15, partnerId: 'part_yasmim'),
+        Product(id: '3', name: 'Serviço de Manutenção', costPrice: 0.0, salePrice: 50.0, stockQuantity: 999, isService: true),
+      ];
+    }
+
+    final customersStr = _prefs.getString('customers');
+    if (customersStr != null) {
+      final List decoded = jsonDecode(customersStr);
+      _customers = decoded.map((e) => Customer.fromJson(e)).toList();
+    } else {
+      _customers = [
+        Customer(id: 'c1', name: 'Bru', phone: '5511995282760', isTuccCreditoEnabled: true),
+        Customer(id: 'c2', name: 'Leida', phone: '5511940122955', isTuccCreditoEnabled: true),
+        Customer(id: 'c3', name: 'Babi', phone: '5511940820842', isTuccCreditoEnabled: true),
+        Customer(id: 'c4', name: 'Vinicius', phone: '5511947665145', isTuccCreditoEnabled: true),
+        Customer(id: 'c5', name: 'Andréa', phone: '5511974644099', isTuccCreditoEnabled: true),
+        Customer(id: 'c6', name: 'Alexandre', phone: '5511999990001', isTuccCreditoEnabled: true),
+        Customer(id: 'c7', name: 'Malu Sousa', phone: '5511999990002', isTuccCreditoEnabled: true),
+        Customer(id: 'c8', name: 'Samira', phone: '5511999990003', isTuccCreditoEnabled: true),
+        Customer(id: 'c9', name: 'Sarah / Juca', phone: '5511999990004', isTuccCreditoEnabled: true),
+        Customer(id: 'c10', name: 'Larissa Pescarolli', phone: '5511999990005', isTuccCreditoEnabled: true),
+        Customer(id: 'c11', name: 'Cristiane Trindade TUCC', phone: '5511999990006', isTuccCreditoEnabled: true),
+        Customer(id: 'c12', name: 'Sophia TUCC', phone: '5511999990007', isTuccCreditoEnabled: true),
+        Customer(id: 'c13', name: 'Tchuca', phone: '5511999990008', isTuccCreditoEnabled: true),
+        Customer(id: 'c14', name: 'Tia Sil Silva', phone: '5511999990009', isTuccCreditoEnabled: true),
+        Customer(id: 'c15', name: 'Victória Toffolo', phone: '5511999990010', isTuccCreditoEnabled: true),
+        Customer(id: 'c16', name: 'Vitoria TUCC', phone: '5511999990011', isTuccCreditoEnabled: true),
+        Customer(id: 'c17', name: 'Yasmim', phone: '5511999990012', isTuccCreditoEnabled: true),
+        Customer(id: 'c18', name: 'Murilo Miyazato', phone: '5511999990013', isTuccCreditoEnabled: true),
+        Customer(id: 'c19', name: 'Gabriel Marques', phone: '5511999990014', isTuccCreditoEnabled: true),
+        Customer(id: 'c20', name: 'Milena Teumo', phone: '5511999990015', isTuccCreditoEnabled: true),
+        Customer(id: 'c21', name: 'Tainá Mattos', phone: '5511999990016', isTuccCreditoEnabled: true),
+        Customer(id: 'c22', name: 'Renata Nascimento', phone: '5511999990017', isTuccCreditoEnabled: true),
+        Customer(id: 'c23', name: 'Amanda', phone: '5511999990018', isTuccCreditoEnabled: true),
+        Customer(id: 'c24', name: 'Aninha', phone: '5511999990019', isTuccCreditoEnabled: true),
+        Customer(id: 'c25', name: 'Aline Souza', phone: '5511999990020', isTuccCreditoEnabled: true),
+        Customer(id: 'c26', name: 'Daigo Terreiro', phone: '5511999990021', isTuccCreditoEnabled: true),
+        Customer(id: 'c27', name: 'Juca', phone: '5511999990022', isTuccCreditoEnabled: true),
+        Customer(id: 'c28', name: 'Keith', phone: '5511999990023', isTuccCreditoEnabled: true),
+      ];
+    }
+
+    final partnersStr = _prefs.getString('partners');
+    if (partnersStr != null) {
+      final List decoded = jsonDecode(partnersStr);
+      _partners = decoded.map((e) => Partner.fromJson(e)).toList();
+    } else {
+      _partners = [Partner(id: 'part_yasmim', name: 'Yasmim')];
+    }
+
+    final salesStr = _prefs.getString('sales');
+    if (salesStr != null) {
+      final List decoded = jsonDecode(salesStr);
+      _sales = decoded.map((e) => Sale.fromJson(e)).toList();
+    }
+
+    final shiftStr = _prefs.getString('currentShift');
+    if (shiftStr != null) {
+      _currentShift = Shift.fromJson(jsonDecode(shiftStr));
+    }
+  }
+
+  Future<void> _saveProducts() async {
+    await _prefs.setString('products', jsonEncode(_products.map((e) => e.toJson()).toList()));
+  }
+
+  Future<void> _saveCustomers() async {
+    await _prefs.setString('customers', jsonEncode(_customers.map((e) => e.toJson()).toList()));
+  }
+
+  Future<void> _savePartners() async {
+    await _prefs.setString('partners', jsonEncode(_partners.map((e) => e.toJson()).toList()));
+  }
+
+  Future<void> _saveSales() async {
+    await _prefs.setString('sales', jsonEncode(_sales.map((e) => e.toJson()).toList()));
+  }
+
+  Future<void> _saveShift() async {
+    if (_currentShift == null) {
+      await _prefs.remove('currentShift');
+    } else {
+      await _prefs.setString('currentShift', jsonEncode(_currentShift!.toJson()));
+    }
+  }
 
   void updateAppConfig(String newTitle, String newSubtitle, String newReportPhone, String newPassword) {
     appTitle = newTitle;
@@ -197,53 +400,13 @@ class AppProvider with ChangeNotifier {
     reportPhone = newReportPhone;
     if (newPassword.isNotEmpty) {
       adminPassword = newPassword;
+      _prefs.setString('adminPassword', adminPassword);
     }
+    _prefs.setString('appTitle', appTitle);
+    _prefs.setString('appSubtitle', appSubtitle);
+    _prefs.setString('reportPhone', reportPhone);
     notifyListeners();
   }
-
-  final List<Product> _products = [
-    Product(id: '1', name: 'Salgado Rissoles', costPrice: 3.0, salePrice: 6.0, stockQuantity: 20),
-    Product(id: '2', name: 'Doce da Yasmim', costPrice: 4.0, salePrice: 8.0, stockQuantity: 15, partnerId: 'part_yasmim'),
-    Product(id: '3', name: 'Serviço de Manutenção', costPrice: 0.0, salePrice: 50.0, stockQuantity: 999, isService: true),
-  ];
-
-  final List<Customer> _customers = [
-    Customer(id: 'c1', name: 'Bru', phone: '5511995282760', isTuccCreditoEnabled: true),
-    Customer(id: 'c2', name: 'Leida', phone: '5511940122955', isTuccCreditoEnabled: true),
-    Customer(id: 'c3', name: 'Babi', phone: '5511940820842', isTuccCreditoEnabled: true),
-    Customer(id: 'c4', name: 'Vinicius', phone: '5511947665145', isTuccCreditoEnabled: true),
-    Customer(id: 'c5', name: 'Andréa', phone: '5511974644099', isTuccCreditoEnabled: true),
-    Customer(id: 'c6', name: 'Alexandre', phone: '5511999990001', isTuccCreditoEnabled: true),
-    Customer(id: 'c7', name: 'Malu Sousa', phone: '5511999990002', isTuccCreditoEnabled: true),
-    Customer(id: 'c8', name: 'Samira', phone: '5511999990003', isTuccCreditoEnabled: true),
-    Customer(id: 'c9', name: 'Sarah / Juca', phone: '5511999990004', isTuccCreditoEnabled: true),
-    Customer(id: 'c10', name: 'Larissa Pescarolli', phone: '5511999990005', isTuccCreditoEnabled: true),
-    Customer(id: 'c11', name: 'Cristiane Trindade TUCC', phone: '5511999990006', isTuccCreditoEnabled: true),
-    Customer(id: 'c12', name: 'Sophia TUCC', phone: '5511999990007', isTuccCreditoEnabled: true),
-    Customer(id: 'c13', name: 'Tchuca', phone: '5511999990008', isTuccCreditoEnabled: true),
-    Customer(id: 'c14', name: 'Tia Sil Silva', phone: '5511999990009', isTuccCreditoEnabled: true),
-    Customer(id: 'c15', name: 'Victória Toffolo', phone: '5511999990010', isTuccCreditoEnabled: true),
-    Customer(id: 'c16', name: 'Vitoria TUCC', phone: '5511999990011', isTuccCreditoEnabled: true),
-    Customer(id: 'c17', name: 'Yasmim', phone: '5511999990012', isTuccCreditoEnabled: true),
-    Customer(id: 'c18', name: 'Murilo Miyazato', phone: '5511999990013', isTuccCreditoEnabled: true),
-    Customer(id: 'c19', name: 'Gabriel Marques', phone: '5511999990014', isTuccCreditoEnabled: true),
-    Customer(id: 'c20', name: 'Milena Teumo', phone: '5511999990015', isTuccCreditoEnabled: true),
-    Customer(id: 'c21', name: 'Tainá Mattos', phone: '5511999990016', isTuccCreditoEnabled: true),
-    Customer(id: 'c22', name: 'Renata Nascimento', phone: '5511999990017', isTuccCreditoEnabled: true),
-    Customer(id: 'c23', name: 'Amanda', phone: '5511999990018', isTuccCreditoEnabled: true),
-    Customer(id: 'c24', name: 'Aninha', phone: '5511999990019', isTuccCreditoEnabled: true),
-    Customer(id: 'c25', name: 'Aline Souza', phone: '5511999990020', isTuccCreditoEnabled: true),
-    Customer(id: 'c26', name: 'Daigo Terreiro', phone: '5511999990021', isTuccCreditoEnabled: true),
-    Customer(id: 'c27', name: 'Juca', phone: '5511999990022', isTuccCreditoEnabled: true),
-    Customer(id: 'c28', name: 'Keith', phone: '5511999990023', isTuccCreditoEnabled: true),
-  ];
-
-  final List<Partner> _partners = [
-    Partner(id: 'part_yasmim', name: 'Yasmim'),
-  ];
-
-  final List<Sale> _sales = [];
-  Shift? _currentShift;
 
   List<Product> get products => _products;
   List<Customer> get customers => _customers;
@@ -253,17 +416,24 @@ class AppProvider with ChangeNotifier {
 
   void startShift(String operatorName, double initialCash) {
     _currentShift = Shift(
-      id: DateTime.now().toString(),
       operatorName: operatorName,
       startTime: DateTime.now(),
       initialCash: initialCash,
     );
+    _saveShift();
+    notifyListeners();
+  }
+
+  void closeShift() {
+    _currentShift = null;
+    _saveShift();
     notifyListeners();
   }
 
   void addSuprimento(double amount) {
     if (_currentShift != null) {
       _currentShift!.totalSuprimento += amount;
+      _saveShift();
       notifyListeners();
     }
   }
@@ -271,12 +441,14 @@ class AppProvider with ChangeNotifier {
   void addSangria(double amount) {
     if (_currentShift != null) {
       _currentShift!.totalSangria += amount;
+      _saveShift();
       notifyListeners();
     }
   }
 
   void addProduct(Product product) {
     _products.add(product);
+    _saveProducts();
     notifyListeners();
   }
 
@@ -284,17 +456,29 @@ class AppProvider with ChangeNotifier {
     final index = _products.indexWhere((p) => p.id == updated.id);
     if (index != -1) {
       _products[index] = updated;
+      _saveProducts();
+      notifyListeners();
+    }
+  }
+
+  void updateStock(String productId, int newQuantity) {
+    final index = _products.indexWhere((p) => p.id == productId);
+    if (index != -1) {
+      _products[index].stockQuantity = newQuantity;
+      _saveProducts();
       notifyListeners();
     }
   }
 
   void deleteProduct(String id) {
     _products.removeWhere((p) => p.id == id);
+    _saveProducts();
     notifyListeners();
   }
 
   void addCustomer(Customer customer) {
     _customers.add(customer);
+    _saveCustomers();
     notifyListeners();
   }
 
@@ -302,12 +486,14 @@ class AppProvider with ChangeNotifier {
     final index = _customers.indexWhere((c) => c.id == updated.id);
     if (index != -1) {
       _customers[index] = updated;
+      _saveCustomers();
       notifyListeners();
     }
   }
 
   void deleteCustomer(String id) {
     _customers.removeWhere((c) => c.id == id);
+    _saveCustomers();
     notifyListeners();
   }
 
@@ -323,6 +509,7 @@ class AppProvider with ChangeNotifier {
     if (paymentMethod == PaymentMethod.tuccCredito) {
       if (customer == null || !customer.isTuccCreditoEnabled) return false;
       customer.pendingBalance += total;
+      _saveCustomers();
     }
 
     for (var item in items) {
@@ -333,8 +520,10 @@ class AppProvider with ChangeNotifier {
       if (item.partnerId != null) {
         final partner = _partners.firstWhere((p) => p.id == item.partnerId);
         partner.balanceToRepay += item.totalPrice;
+        _savePartners();
       }
     }
+    _saveProducts();
 
     _sales.add(
       Sale(
@@ -347,32 +536,38 @@ class AppProvider with ChangeNotifier {
         operatorName: _currentShift!.operatorName,
       ),
     );
+    _saveSales();
 
     notifyListeners();
     return true;
   }
 
-  void payPendingBalance(Customer customer, double amount) {
-    customer.pendingBalance -= amount;
+  void payPendingBalance(Customer customer, double amountPaid) {
+    customer.pendingBalance -= amountPaid;
     if (customer.pendingBalance < 0) customer.pendingBalance = 0;
+    _saveCustomers();
     notifyListeners();
   }
 
-  double get totalSalesToday {
-    final now = DateTime.now();
-    return _sales.where((s) => s.date.day == now.day && s.date.month == now.month).fold(0, (sum, s) => sum + s.totalAmount);
+  double getTotalSalesForDate(DateTime date) {
+    return _sales
+        .where((s) => s.date.year == date.year && s.date.month == date.month && s.date.day == date.day)
+        .fold(0, (sum, s) => sum + s.totalAmount);
   }
 
-  double get totalProfitToday {
-    final now = DateTime.now();
+  double getTotalProfitForDate(DateTime date) {
     double profit = 0;
-    for (var sale in _sales.where((s) => s.date.day == now.day && s.date.month == now.month)) {
+    final daySales = _sales.where((s) => s.date.year == date.year && s.date.month == date.month && s.date.day == date.day);
+    for (var sale in daySales) {
       for (var item in sale.items) {
         profit += item.totalProfit;
       }
     }
     return profit;
   }
+
+  double get totalSalesToday => getTotalSalesForDate(DateTime.now());
+  double get totalProfitToday => getTotalProfitForDate(DateTime.now());
 }
 
 // ==========================================
@@ -407,7 +602,9 @@ class WhatsAppService {
     required double totalAmount,
     required List<String> itemNames,
   }) async {
+    String formattedDate = DateFormat('dd/MM/yyyy').format(DateTime.now());
     String message = "Olá $customerName! 🥪 *TUCC VENDAS*\n\n"
+        "Data da compra: *$formattedDate*\n"
         "Sua compra no *TUCC CRÉDITO* foi realizada:\n"
         "${itemNames.map((e) => '- $e').join('\n')}\n\n"
         "*Total lançado:* R\$ ${totalAmount.toStringAsFixed(2)}\n\n"
@@ -420,10 +617,27 @@ class WhatsAppService {
     required String customerName,
     required double pendingBalance,
   }) async {
+    String formattedDate = DateFormat('dd/MM/yyyy').format(DateTime.now());
     String message = "Olá $customerName! 🥪 *TUCC VENDAS - TUCC CRÉDITO*\n\n"
+        "Data do extrato: *$formattedDate*\n"
         "Passando para informar o seu saldo devedor atual:\n"
         "*Valor Pendente:* R\$ ${pendingBalance.toStringAsFixed(2)}\n\n"
         "Qualquer dúvida, estamos à disposição!";
+    await launchWhatsApp(phone, message);
+  }
+
+  static Future<void> sendPaymentReceipt({
+    required String phone,
+    required String customerName,
+    required double paidAmount,
+    required double remainingBalance,
+  }) async {
+    String formattedDate = DateFormat('dd/MM/yyyy').format(DateTime.now());
+    String message = "Olá $customerName! 🥪 *TUCC VENDAS - PAGAMENTO*\n\n"
+        "Data do pagamento: *$formattedDate*\n"
+        "Valor Pago: R\$ ${paidAmount.toStringAsFixed(2)}\n"
+        "Saldo Restante Pendente: R\$ ${remainingBalance.toStringAsFixed(2)}\n\n"
+        "Obrigado!";
     await launchWhatsApp(phone, message);
   }
 
@@ -643,6 +857,13 @@ class HomeScreen extends StatelessWidget {
                     ),
                     _buildMenuButton(
                       context,
+                      title: "Auditoria de Inventário",
+                      icon: Icons.inventory,
+                      color: Colors.teal,
+                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const InventoryScreen())),
+                    ),
+                    _buildMenuButton(
+                      context,
                       title: "TUCC Crédito & Clientes",
                       icon: Icons.people,
                       color: Colors.blue,
@@ -730,7 +951,7 @@ class _ShiftScreenState extends State<ShiftScreen> {
             : Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text("Operador: ${provider.currentShift!.operatorName}", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  Text("Operador Ativo: ${provider.currentShift!.operatorName}", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                   Text("Troco Inicial: R\$ ${provider.currentShift!.initialCash.toStringAsFixed(2)}"),
                   Text("Suprimentos: R\$ ${provider.currentShift!.totalSuprimento.toStringAsFixed(2)}"),
                   Text("Sangrias: R\$ ${provider.currentShift!.totalSangria.toStringAsFixed(2)}"),
@@ -749,8 +970,130 @@ class _ShiftScreenState extends State<ShiftScreen> {
                     },
                     child: const Text('Registrar Sangria (-R\$ 10)'),
                   ),
+                  const Spacer(),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(50)),
+                    icon: const Icon(Icons.lock),
+                    label: const Text('Encerrar Turno / Mudar Operador (Requer Admin)'),
+                    onPressed: () {
+                      AdminAuth.verify(context, () {
+                        provider.closeShift();
+                        Navigator.pop(context);
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Turno encerrado com sucesso!')));
+                      });
+                    },
+                  ),
                 ],
               ),
+      ),
+    );
+  }
+}
+
+class InventoryScreen extends StatefulWidget {
+  const InventoryScreen({super.key});
+
+  @override
+  State<InventoryScreen> createState() => _InventoryScreenState();
+}
+
+class _InventoryScreenState extends State<InventoryScreen> {
+  final Map<String, TextEditingController> _controllers = {};
+
+  @override
+  void initState() {
+    super.initState();
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    for (var prod in provider.products) {
+      _controllers[prod.id] = TextEditingController(text: prod.stockQuantity.toString());
+    }
+  }
+
+  @override
+  void dispose() {
+    for (var controller in _controllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = Provider.of<AppProvider>(context);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Auditoria de Inventário')),
+      body: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            color: Colors.teal.shade50,
+            child: const Text(
+              'Conte fisicamente os produtos e ajuste a quantidade abaixo. Se houver divergência, atualize para bater com o estoque real.',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: provider.products.length,
+              itemBuilder: (context, index) {
+                final p = provider.products[index];
+                if (p.isService) return const SizedBox.shrink();
+
+                if (!_controllers.containsKey(p.id)) {
+                  _controllers[p.id] = TextEditingController(text: p.stockQuantity.toString());
+                }
+
+                return Card(
+                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12.0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                              Text('Sistema: ${p.stockQuantity} un', style: const TextStyle(color: Colors.grey)),
+                            ],
+                          ),
+                        ),
+                        Expanded(
+                          flex: 2,
+                          child: TextField(
+                            controller: _controllers[p.id],
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Contagem Real',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
+                          onPressed: () {
+                            AdminAuth.verify(context, () {
+                              int realQty = int.tryParse(_controllers[p.id]?.text ?? '') ?? p.stockQuantity;
+                              provider.updateStock(p.id, realQty);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Estoque de ${p.name} atualizado para $realQty!')),
+                              );
+                            });
+                          },
+                          child: const Text('Salvar'),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -767,11 +1110,25 @@ class _PosScreenState extends State<PosScreen> {
   final List<SaleItem> _cart = [];
   PaymentMethod _selectedPayment = PaymentMethod.dinheiro;
   Customer? _selectedCustomer;
+  String _customerSearchQuery = '';
+  String _customerSortOrder = 'az';
 
   @override
   Widget build(BuildContext context) {
     final provider = Provider.of<AppProvider>(context);
     double total = _cart.fold(0, (sum, i) => sum + i.totalPrice);
+
+    List<Customer> filteredCustomers = provider.customers
+        .where((c) => c.isTuccCreditoEnabled && c.name.toLowerCase().contains(_customerSearchQuery.toLowerCase()))
+        .toList();
+
+    if (_customerSortOrder == 'az') {
+      filteredCustomers.sort((a, b) => a.name.compareTo(b.name));
+    } else if (_customerSortOrder == 'za') {
+      filteredCustomers.sort((a, b) => b.name.compareTo(a.name));
+    } else if (_customerSortOrder == 'debito_desc') {
+      filteredCustomers.sort((a, b) => b.pendingBalance.compareTo(a.pendingBalance));
+    }
 
     return Scaffold(
       appBar: AppBar(title: const Text('Frente de Caixa (PDV)')),
@@ -810,70 +1167,113 @@ class _PosScreenState extends State<PosScreen> {
             flex: 2,
             child: Padding(
               padding: const EdgeInsets.all(8.0),
-              child: Column(
-                children: [
-                  const Text("Carrinho", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: _cart.length,
-                      itemBuilder: (context, index) => ListTile(
-                        title: Text(_cart[index].productName),
-                        subtitle: Text("R\$ ${_cart[index].unitPrice}"),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () => setState(() => _cart.removeAt(index)),
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    const Text("Carrinho", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                    SizedBox(
+                      height: 150,
+                      child: ListView.builder(
+                        itemCount: _cart.length,
+                        itemBuilder: (context, index) => ListTile(
+                          title: Text(_cart[index].productName),
+                          subtitle: Text("R\$ ${_cart[index].unitPrice}"),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => setState(() => _cart.removeAt(index)),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  Text("Total: R\$ ${total.toStringAsFixed(2)}", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.green)),
-                  DropdownButton<PaymentMethod>(
-                    value: _selectedPayment,
-                    isExpanded: true,
-                    items: PaymentMethod.values.map((m) {
-                      return DropdownMenuItem(value: m, child: Text(m.name.toUpperCase()));
-                    }).toList(),
-                    onChanged: (val) => setState(() => _selectedPayment = val!),
-                  ),
-                  if (_selectedPayment == PaymentMethod.tuccCredito)
-                    DropdownButton<Customer>(
-                      hint: const Text("Selecione (TUCC CRÉDITO)"),
-                      value: _selectedCustomer,
+                    Text("Total: R\$ ${total.toStringAsFixed(2)}", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.green)),
+                    DropdownButton<PaymentMethod>(
+                      value: _selectedPayment,
                       isExpanded: true,
-                      items: provider.customers.where((c) => c.isTuccCreditoEnabled).map((c) {
-                        return DropdownMenuItem(value: c, child: Text(c.name));
+                      items: PaymentMethod.values.map((m) {
+                        return DropdownMenuItem(value: m, child: Text(m.name.toUpperCase()));
                       }).toList(),
-                      onChanged: (val) => setState(() => _selectedCustomer = val),
+                      onChanged: (val) => setState(() => _selectedPayment = val!),
                     ),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green, minimumSize: const Size.fromHeight(50)),
-                    onPressed: _cart.isEmpty
-                        ? null
-                        : () {
-                            bool success = provider.processSale(
-                              items: _cart,
-                              paymentMethod: _selectedPayment,
-                              customer: _selectedCustomer,
+                    if (_selectedPayment == PaymentMethod.tuccCredito) ...[
+                      const SizedBox(height: 5),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              decoration: const InputDecoration(
+                                hintText: 'Pesquisar cliente...',
+                                prefixIcon: Icon(Icons.search),
+                                isDense: true,
+                                border: OutlineInputBorder(),
+                              ),
+                              onChanged: (val) => setState(() => _customerSearchQuery = val),
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          DropdownButton<String>(
+                            value: _customerSortOrder,
+                            items: const [
+                              DropdownMenuItem(value: 'az', child: Text('A-Z')),
+                              DropdownMenuItem(value: 'za', child: Text('Z-A')),
+                              DropdownMenuItem(value: 'debito_desc', child: Text('Maior Débito')),
+                            ],
+                            onChanged: (val) => setState(() => _customerSortOrder = val!),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 5),
+                      SizedBox(
+                        height: 55,
+                        child: DropdownButtonFormField<Customer>(
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            isDense: true,
+                          ),
+                          hint: const Text("Selecione o Cliente (TUCC CRÉDITO)"),
+                          value: _selectedCustomer,
+                          isExpanded: true,
+                          items: filteredCustomers.map((c) {
+                            return DropdownMenuItem(
+                              value: c, 
+                              child: Text("${c.name} (R\$ ${c.pendingBalance.toStringAsFixed(2)})", overflow: TextOverflow.ellipsis),
                             );
+                          }).toList(),
+                          onChanged: (val) => setState(() => _selectedCustomer = val),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green, minimumSize: const Size.fromHeight(50)),
+                      onPressed: _cart.isEmpty
+                          ? null
+                          : () {
+                              bool success = provider.processSale(
+                                items: _cart,
+                                paymentMethod: _selectedPayment,
+                                customer: _selectedCustomer,
+                              );
 
-                            if (success) {
-                              if (_selectedPayment == PaymentMethod.tuccCredito && _selectedCustomer != null) {
-                                WhatsAppService.sendSaleReceipt(
-                                  phone: _selectedCustomer!.phone,
-                                  customerName: _selectedCustomer!.name,
-                                  totalAmount: total,
-                                  itemNames: _cart.map((e) => e.productName).toList(),
-                                );
+                              if (success) {
+                                if (_selectedPayment == PaymentMethod.tuccCredito && _selectedCustomer != null) {
+                                  WhatsAppService.sendSaleReceipt(
+                                    phone: _selectedCustomer!.phone,
+                                    customerName: _selectedCustomer!.name,
+                                    totalAmount: total,
+                                    itemNames: _cart.map((e) => e.productName).toList(),
+                                  );
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Venda Realizada!')));
+                                setState(() => _cart.clear());
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Erro: Cliente sem TUCC CRÉDITO.')));
                               }
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Venda Realizada!')));
-                              setState(() => _cart.clear());
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Erro: Cliente sem TUCC CRÉDITO.')));
-                            }
-                          },
-                    child: const Text("FINALIZAR", style: TextStyle(color: Colors.white)),
-                  )
-                ],
+                            },
+                      child: const Text("FINALIZAR", style: TextStyle(color: Colors.white)),
+                    )
+                  ],
+                ),
               ),
             ),
           ),
@@ -1000,8 +1400,16 @@ class ProductsScreen extends StatelessWidget {
   }
 }
 
-class CustomersScreen extends StatelessWidget {
+class CustomersScreen extends StatefulWidget {
   const CustomersScreen({super.key});
+
+  @override
+  State<CustomersScreen> createState() => _CustomersScreenState();
+}
+
+class _CustomersScreenState extends State<CustomersScreen> {
+  String _searchQuery = '';
+  String _sortOrder = 'az';
 
   void _showCustomerDialog(BuildContext context, {Customer? customer}) {
     final provider = Provider.of<AppProvider>(context, listen: false);
@@ -1056,9 +1464,74 @@ class CustomersScreen extends StatelessWidget {
     );
   }
 
+  void _showPaymentDialog(BuildContext context, Customer customer) {
+    final provider = Provider.of<AppProvider>(context, listen: false);
+    final amountController = TextEditingController(text: customer.pendingBalance.toStringAsFixed(2));
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Quitar / Pagar Débito - ${customer.name}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Débito Atual: R\$ ${customer.pendingBalance.toStringAsFixed(2)}'),
+            const SizedBox(height: 10),
+            TextField(
+              controller: amountController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Valor Pago pelo Cliente', border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+          ElevatedButton(
+            onPressed: () {
+              double paidAmount = double.tryParse(amountController.text.replaceAll(',', '.')) ?? 0.0;
+              if (paidAmount > 0) {
+                AdminAuth.verify(context, () {
+                  provider.payPendingBalance(customer, paidAmount);
+                  double remainingBalance = customer.pendingBalance;
+
+                  WhatsAppService.sendPaymentReceipt(
+                    phone: customer.phone,
+                    customerName: customer.name,
+                    paidAmount: paidAmount,
+                    remainingBalance: remainingBalance,
+                  );
+
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Pagamento de R\$ ${paidAmount.toStringAsFixed(2)} registrado!')),
+                  );
+                });
+              }
+            },
+            child: const Text('Confirmar Pagamento'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final provider = Provider.of<AppProvider>(context);
+
+    List<Customer> displayedCustomers = provider.customers
+        .where((c) => c.name.toLowerCase().contains(_searchQuery.toLowerCase()))
+        .toList();
+
+    if (_sortOrder == 'az') {
+      displayedCustomers.sort((a, b) => a.name.compareTo(b.name));
+    } else if (_sortOrder == 'za') {
+      displayedCustomers.sort((a, b) => b.name.compareTo(a.name));
+    } else if (_sortOrder == 'debito_desc') {
+      displayedCustomers.sort((a, b) => b.pendingBalance.compareTo(a.pendingBalance));
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Controle TUCC Crédito'),
@@ -1080,48 +1553,81 @@ class CustomersScreen extends StatelessWidget {
           )
         ],
       ),
-      body: ListView.builder(
-        itemCount: provider.customers.length,
-        itemBuilder: (context, index) {
-          final c = provider.customers[index];
-          return Card(
-            child: ListTile(
-              title: Text(c.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text("Débito: R\$ ${c.pendingBalance.toStringAsFixed(2)} | Tel: ${c.phone}"),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.chat, color: Colors.green),
-                    tooltip: 'Enviar extrato por WhatsApp (Caixa/Admin)',
-                    onPressed: () {
-                      WhatsAppService.sendCustomerDebt(
-                        phone: c.phone,
-                        customerName: c.name,
-                        pendingBalance: c.pendingBalance,
-                      );
-                    },
-                  ),
-                  if (c.pendingBalance > 0)
-                    TextButton(
-                      onPressed: () => AdminAuth.verify(context, () => provider.payPendingBalance(c, c.pendingBalance)),
-                      child: const Text("Quitar"),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    decoration: const InputDecoration(
+                      labelText: 'Pesquisar Cliente pelo Nome',
+                      prefixIcon: Icon(Icons.search),
+                      border: OutlineInputBorder(),
                     ),
-                  IconButton(
-                    icon: const Icon(Icons.edit, color: Colors.blue),
-                    tooltip: 'Editar (Requer Admin)',
-                    onPressed: () => AdminAuth.verify(context, () => _showCustomerDialog(context, customer: c)),
+                    onChanged: (val) => setState(() => _searchQuery = val),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    tooltip: 'Excluir (Requer Admin)',
-                    onPressed: () => AdminAuth.verify(context, () => provider.deleteCustomer(c.id)),
-                  ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 10),
+                DropdownButton<String>(
+                  value: _sortOrder,
+                  items: const [
+                    DropdownMenuItem(value: 'az', child: Text('A-Z')),
+                    DropdownMenuItem(value: 'za', child: Text('Z-A')),
+                    DropdownMenuItem(value: 'debito_desc', child: Text('Maior Débito')),
+                  ],
+                  onChanged: (val) => setState(() => _sortOrder = val!),
+                ),
+              ],
             ),
-          );
-        },
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: displayedCustomers.length,
+              itemBuilder: (context, index) {
+                final c = displayedCustomers[index];
+                return Card(
+                  child: ListTile(
+                    title: Text(c.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text("Débito: R\$ ${c.pendingBalance.toStringAsFixed(2)} | Tel: ${c.phone}"),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.chat, color: Colors.green),
+                          tooltip: 'Enviar extrato por WhatsApp (Caixa/Admin)',
+                          onPressed: () {
+                            WhatsAppService.sendCustomerDebt(
+                              phone: c.phone,
+                              customerName: c.name,
+                              pendingBalance: c.pendingBalance,
+                            );
+                          },
+                        ),
+                        if (c.pendingBalance > 0)
+                          TextButton(
+                            onPressed: () => _showPaymentDialog(context, c),
+                            child: const Text("Pagar"),
+                          ),
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.blue),
+                          tooltip: 'Editar (Requer Admin)',
+                          onPressed: () => AdminAuth.verify(context, () => _showCustomerDialog(context, customer: c)),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          tooltip: 'Excluir (Requer Admin)',
+                          onPressed: () => AdminAuth.verify(context, () => provider.deleteCustomer(c.id)),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         tooltip: 'Novo Cliente (Requer Admin)',
@@ -1174,12 +1680,18 @@ class ReportsScreen extends StatelessWidget {
           const SizedBox(height: 20),
           ElevatedButton.icon(
             icon: const Icon(Icons.share),
-            label: const Text("Enviar Relatório Diário via WhatsApp (Caixa/Admin)"),
+            label: const Text("Enviar Relatório Diário com Estoque via WhatsApp"),
             onPressed: () {
-              String report = "*RELATÓRIO DIÁRIO TUCC VENDAS*\n\n"
+              String stockList = provider.products
+                  .map((p) => '• ${p.name}: ${p.isService ? "Serviço" : "${p.stockQuantity} un"}')
+                  .join('\n');
+
+              String report = "*RELATÓRIO DIÁRIO & ESTOQUE*\n\n"
                   "Total Vendido: R\$ ${provider.totalSalesToday.toStringAsFixed(2)}\n"
                   "Lucro Líquido: R\$ ${provider.totalProfitToday.toStringAsFixed(2)}\n"
-                  "Operador: ${provider.currentShift?.operatorName ?? 'N/A'}";
+                  "Operador: ${provider.currentShift?.operatorName ?? 'N/A'}\n\n"
+                  "*ESTOQUE ATUAL:*\n$stockList";
+
               WhatsAppService.sendDailyReport(targetPhone: provider.reportPhone, reportText: report);
             },
           )
